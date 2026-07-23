@@ -44,7 +44,8 @@ DOC_REV_PATTERNS = [
 
 
 def normalize_revision(rev: str) -> str:
-    rev = rev.strip().lower().replace("revision", "").replace("rev", "").strip()
+    rev = rev.strip().lower()
+    rev = rev.replace("version", "").replace("revision", "").replace("rev", "").strip()
     rev = rev.replace("v", "").strip()
     if rev.isdigit():
         return rev.zfill(2)
@@ -170,17 +171,134 @@ def parse_text_documents(full_text: str) -> List[Tuple[str, str]]:
     return dedup
 
 
+def _parse_doc_entry(entry: str) -> Optional[Tuple[str, str]]:
+    """Parse a single document entry line such as
+    'QS-03 Human Resources Management Procedure, version 02'
+    and return (full_title, revision) or None if the line is not a document entry.
+    """
+    entry = entry.strip()
+    if not entry:
+        return None
+
+    # Match "version NN" or "Rev NN" / "Revision NN" at the end (optionally preceded by comma)
+    rev_match = re.search(r",?\s*(?:version|rev(?:ision)?)\s+(\d{1,2})\b.*$", entry, re.IGNORECASE)
+    if rev_match:
+        revision = rev_match.group(1).zfill(2)
+        title = entry[: rev_match.start()].strip().rstrip(",").strip()
+    else:
+        # No revision info found – skip lines that don't look like document entries
+        doc_prefix = re.match(r"^[A-Za-z]{1,10}[-/][A-Za-z0-9]{1,10}\b", entry)
+        if not doc_prefix:
+            return None
+        revision = ""
+        title = entry
+
+    if not title:
+        return None
+    return (title, revision)
+
+
+def parse_group_training_record(tables: List[List[List[Optional[str]]]]) -> List[Record]:
+    """Parse the NUS Life Sciences Institute Group Training Record PDF format.
+
+    The form has one large table with two logical sections:
+    1. A document block at the top, identified by a header cell containing
+       "Document Number" (and possibly "Revision").  Document entries may appear
+       one per row or as multiple newline-separated lines inside a single cell.
+    2. A trainee roster below, identified by a header row whose cells contain
+       "Trainee Name" and "Trainee Employee ID".
+
+    Returns the cross-product of trainees × documents as ``List[Record]``.
+    Returns an empty list when the format is not recognised (so the caller can
+    fall back to the existing general-purpose parser).
+    """
+    documents: List[Tuple[str, str]] = []  # (title, revision)
+    trainees: List[Tuple[str, str]] = []  # (name, employee_id)
+
+    for table in tables:
+        if not table:
+            continue
+
+        doc_block_start: Optional[int] = None
+        doc_col: Optional[int] = None
+        trainee_header_row: Optional[int] = None
+        trainee_name_col: Optional[int] = None
+        trainee_id_col: Optional[int] = None
+
+        for i, row in enumerate(table):
+            for j, cell in enumerate(row):
+                if not cell:
+                    continue
+                cell_low = cell.strip().lower()
+                if "document number" in cell_low and doc_block_start is None:
+                    doc_block_start = i
+                    doc_col = j
+                if "trainee name" in cell_low and trainee_header_row is None:
+                    trainee_header_row = i
+                    trainee_name_col = j
+                if trainee_header_row == i and ("trainee employee id" in cell_low or (
+                        "employee id" in cell_low and "trainee" in cell_low)):
+                    trainee_id_col = j
+
+        # Extract documents from the document block
+        if doc_block_start is not None and doc_col is not None:
+            doc_end = trainee_header_row if trainee_header_row is not None else len(table)
+            for row in table[doc_block_start + 1 : doc_end]:
+                if not row or doc_col >= len(row):
+                    continue
+                cell = (row[doc_col] or "").strip()
+                if not cell:
+                    continue
+                for line in cell.splitlines():
+                    parsed = _parse_doc_entry(line)
+                    if parsed:
+                        documents.append(parsed)
+
+        # Extract trainees from the trainee roster
+        if trainee_header_row is not None:
+            for row in table[trainee_header_row + 1 :]:
+                if not row:
+                    continue
+                name = ""
+                emp_id = ""
+                if trainee_name_col is not None and trainee_name_col < len(row):
+                    name = (row[trainee_name_col] or "").strip()
+                if trainee_id_col is not None and trainee_id_col < len(row):
+                    emp_id = (row[trainee_id_col] or "").strip()
+                # Skip blank or placeholder rows
+                if not name or re.match(r"^[\s_\-]*$", name):
+                    continue
+                trainees.append((name, emp_id))
+
+    if not documents or not trainees:
+        return []
+
+    # Cross-join: every trainee × every document → one Record
+    return [
+        Record(name=name, employee_id=emp_id, title=title, revision=rev)
+        for name, emp_id in trainees
+        for title, rev in documents
+    ]
+
+
 def extract_records_from_pdf(file_bytes: bytes, source_name: str) -> List[Record]:
     all_text_parts: List[str] = []
     table_documents: List[Tuple[str, str]] = []
+    all_tables: List[List[List[Optional[str]]]] = []
 
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         for page in pdf.pages:
             page_text = page.extract_text() or ""
             all_text_parts.append(page_text)
             tables = page.extract_tables() or []
+            all_tables.extend(tables)
             for table in tables:
                 table_documents.extend(parse_table_documents(table))
+
+    # Try the NUS Group Training Record format first
+    group_records = parse_group_training_record(all_tables)
+    if group_records:
+        return group_records
 
     full_text = normalize_text_blocks("\n".join(all_text_parts))
     name = extract_name(full_text)
