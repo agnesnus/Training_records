@@ -148,7 +148,11 @@ def parse_text_documents(full_text: str) -> List[Tuple[str, str]]:
     # Secondary fallback for broken lines: line that ends with revision, followed by title line.
     lines = [line.strip() for line in full_text.splitlines() if line.strip()]
     for idx in range(len(lines) - 1):
-        m = re.search(r"^([A-Za-z]{1,10}[A-Za-z0-9\-_/]{1,30}).*?(?:rev(?:ision)?\s*)?(v?\d{1,2})\s*$", lines[idx], re.IGNORECASE)
+        m = re.search(
+            r"^([A-Za-z]{1,10}[A-Za-z0-9\-_/]{1,30}).*?(?:rev(?:ision)?\s*)?(v?\d{1,2})\s*$",
+            lines[idx],
+            re.IGNORECASE,
+        )
         if not m:
             continue
         next_line = lines[idx + 1]
@@ -179,32 +183,32 @@ def _parse_doc_entry(entry: str) -> Optional[Tuple[str, str]]:
     entry = entry.strip()
     if not entry:
         return None
- # Skip obvious non-document noise from the template
+
+    # Skip obvious non-document noise from the template
     low = entry.lower()
-    if any(token in low for token in [
-        "evaluation method",
-        "self-evaluation",
-        "signature",
-        "trainee name",
-        "trainee employee id",
-        "document number",
-        "note:",
-    ]):
+    if any(
+        token in low
+        for token in [
+            "evaluation method",
+            "self-evaluation",
+            "signature",
+            "trainee name",
+            "trainee employee id",
+            "document number",
+            "note:",
+        ]
+    ):
         return None
 
     # Match "version NN" or "Rev NN" / "Revision NN" anywhere near the end
     rev_match = re.search(r"(?:,|\s)\s*(?:version|rev(?:ision)?)\s*[:\-]?\s*(\d{1,2})\b", entry, re.IGNORECASE)
-     if rev_match:
-         revision = rev_match.group(1).zfill(2)
-         title = entry[: rev_match.start()].strip().rstrip(",").strip()
-     else:
-       # No revision info found – keep only lines that look like doc entries
-       # e.g. QS-03 ..., SOP-21 ..., WI/07 ...
-       doc_prefix = re.match(r"^[A-Za-z]{1,10}(?:[-/][A-Za-z0-9]{1,10})+\b", entry)
-         if not doc_prefix:
-             return None
-         revision = ""
-         title = entry
+    if rev_match:
+        revision = rev_match.group(1).zfill(2)
+        title = entry[: rev_match.start()].strip().rstrip(",").strip()
+    else:
+        # No revision info found – keep only lines that look like doc entries
+        # e.g. QS-03 ..., SOP-21 ..., WI/07 ...
+        doc_prefix = re.match(r"^[A-Za-z]{1,10}(?:[-/][A-Za-z0-9]{1,10})+\b", entry)
         if not doc_prefix:
             return None
         revision = ""
@@ -243,21 +247,21 @@ def parse_group_training_record(tables: List[List[List[Optional[str]]]]) -> List
         trainee_id_col: Optional[int] = None
 
         for i, row in enumerate(table):
-             for j, cell in enumerate(row):
-                 if not cell:
-                     continue
-                 cell_low = cell.strip().lower()
-                 if "document number" in cell_low and doc_block_start is None:
-                     doc_block_start = i
-                     doc_col = j
-                 if "trainee name" in cell_low and trainee_header_row is None:
-                     trainee_header_row = i
-                     trainee_name_col = j
-                 if trainee_header_row == i and (
+            for j, cell in enumerate(row):
+                if not cell:
+                    continue
+                cell_low = cell.strip().lower()
+                if "document number" in cell_low and doc_block_start is None:
+                    doc_block_start = i
+                    doc_col = j
+                if "trainee name" in cell_low and trainee_header_row is None:
+                    trainee_header_row = i
+                    trainee_name_col = j
+                if trainee_header_row == i and (
                     "trainee employee id" in cell_low
                     or ("employee id" in cell_low and "trainee" in cell_low)
                 ):
-                     trainee_id_col = j
+                    trainee_id_col = j
 
         # Extract documents from the document block
         if doc_block_start is not None and doc_col is not None:
@@ -270,9 +274,9 @@ def parse_group_training_record(tables: List[List[List[Optional[str]]]]) -> List
                     continue
                 # Robust split for cells containing multiple entries
                 for line in re.split(r"\n|;|\r", cell):
-                     parsed = _parse_doc_entry(line)
-                     if parsed:
-                         documents.append(parsed)
+                    parsed = _parse_doc_entry(line)
+                    if parsed:
+                        documents.append(parsed)
 
         # Extract trainees from the trainee roster
         if trainee_header_row is not None:
@@ -285,6 +289,7 @@ def parse_group_training_record(tables: List[List[List[Optional[str]]]]) -> List
                     name = (row[trainee_name_col] or "").strip()
                 if trainee_id_col is not None and trainee_id_col < len(row):
                     emp_id = (row[trainee_id_col] or "").strip()
+
                 # Skip blank or placeholder rows
                 if not name or re.match(r"^[\s_\-]*$", name):
                     continue
@@ -293,10 +298,11 @@ def parse_group_training_record(tables: List[List[List[Optional[str]]]]) -> List
                     continue
                 if len(re.sub(r"[^A-Za-z]", "", name)) < 3:
                     continue
-                 trainees.append((name, emp_id))
- 
-     if not documents or not trainees:
-         return []
+
+                trainees.append((name, emp_id))
+
+    if not documents or not trainees:
+        return []
 
     # De-duplicate while preserving order
     doc_seen = set()
@@ -317,7 +323,7 @@ def parse_group_training_record(tables: List[List[List[Optional[str]]]]) -> List
         trainee_seen.add(key)
         dedup_trainees.append(t)
 
-    if not documents or not trainees:
+    if not dedup_documents or not dedup_trainees:
         return []
 
     # Cross-join: every trainee × every document → one Record
@@ -325,7 +331,7 @@ def parse_group_training_record(tables: List[List[List[Optional[str]]]]) -> List
         Record(name=name, employee_id=emp_id, title=title, revision=rev)
         for name, emp_id in dedup_trainees
         for title, rev in dedup_documents
-     ]
+    ]
 
 
 def extract_records_from_pdf(file_bytes: bytes, source_name: str) -> List[Record]:
