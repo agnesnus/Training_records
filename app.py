@@ -16,6 +16,7 @@ class Record:
     employee_id: str
     title: str
     revision: str
+    date: str
 
 
 NAME_PATTERNS = [
@@ -73,6 +74,29 @@ def extract_employee_id(full_text: str) -> str:
             return match.group(1).strip()
     return ""
 
+def extract_date(full_text: str) -> str:
+    # Common formats: 12/03/2026, 12-03-2026, 2026-03-12
+    patterns = [
+        re.compile(r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b"),
+        re.compile(r"\b(\d{4}[/-]\d{1,2}[/-]\d{1,2})\b"),
+    ]
+    for p in patterns:
+        m = p.search(full_text)
+        if m:
+            return m.group(1)
+
+    return ""
+
+def extract_date_near_signature(full_text: str) -> str:
+    lines = [ln.strip() for ln in full_text.splitlines() if ln.strip()]
+    for i, line in enumerate(lines):
+        if "signature" in line.lower():
+            window = lines[i:i+6]  # look a few lines below
+            joined = " ".join(window)
+            m = re.search(r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})\b", joined)
+            if m:
+                return m.group(1)
+    return ""
 
 def looks_like_header_cell(cell: str, candidates: Iterable[str]) -> bool:
     cell_low = (cell or "").strip().lower()
@@ -201,15 +225,14 @@ def _parse_doc_entry(entry: str) -> Optional[Tuple[str, str]]:
         return None
 
     # Match "version NN" or "Rev NN" / "Revision NN" anywhere near the end
+    entry = re.sub(r"\s+", " ", entry).strip()
     rev_match = re.search(r"(?:,|\s)\s*(?:version|rev(?:ision)?)\s*[:\-]?\s*(\d{1,2})\b", entry, re.IGNORECASE)
     if rev_match:
         revision = rev_match.group(1).zfill(2)
-        title = entry[: rev_match.start()].strip().rstrip(",").strip()
+        title = entry[:rev_match.start()].strip(" ,")
     else:
-        # No revision info found – keep only lines that look like doc entries
-        # e.g. QS-03 ..., SOP-21 ..., WI/07 ...
-        doc_prefix = re.match(r"^[A-Za-z]{1,10}(?:[-/][A-Za-z0-9]{1,10})+\b", entry)
-        if not doc_prefix:
+        # keep full entry as title if it looks like a doc code line
+        if not re.match(r"^[A-Za-z]{1,10}(?:[-/][A-Za-z0-9]{1,10})+\b", entry):
             return None
         revision = ""
         title = entry
@@ -272,8 +295,8 @@ def parse_group_training_record(tables: List[List[List[Optional[str]]]]) -> List
                 cell = (row[doc_col] or "").strip()
                 if not cell:
                     continue
-                # Robust split for cells containing multiple entries
-                for line in re.split(r"\n|;|\r", cell):
+                # Split multi-line entries but keep full title text per line
+                for line in re.split(r"\n|\r", cell):
                     parsed = _parse_doc_entry(line)
                     if parsed:
                         documents.append(parsed)
@@ -354,6 +377,7 @@ def extract_records_from_pdf(file_bytes: bytes, source_name: str) -> List[Record
         return group_records
 
     full_text = normalize_text_blocks("\n".join(all_text_parts))
+    date_value = extract_date_near_signature(full_text) or extract_date(full_text)
     name = extract_name(full_text)
     employee_id = extract_employee_id(full_text)
 
@@ -376,6 +400,7 @@ def extract_records_from_pdf(file_bytes: bytes, source_name: str) -> List[Record
             employee_id=employee_id or "Unknown",
             title=title,
             revision=rev,
+            date=date_value,
         )
         for title, rev in docs
     ]
@@ -393,20 +418,21 @@ def build_excel(records: List[Record]) -> bytes:
     ws["A1"].alignment = Alignment(horizontal="center")
 
     # Column headers
-    headers = ["Name", "Employee ID", "Title", "Revision"]
+    headers = ["Name", "Employee ID", "Title", "Revision", "Date"]
     ws.append(headers)
     for cell in ws[2]:
         cell.font = Font(bold=True)
         cell.alignment = Alignment(horizontal="center")
 
     for record in records:
-        ws.append([record.name, record.employee_id, record.title, record.revision])
+        ws.append([record.name, record.employee_id, record.title, record.revision, record.date])
 
     # Basic sizing for readability.
     ws.column_dimensions["A"].width = 28
     ws.column_dimensions["B"].width = 18
     ws.column_dimensions["C"].width = 80
     ws.column_dimensions["D"].width = 12
+    ws.column_dimensions["E"].width = 16
 
     stream = io.BytesIO()
     wb.save(stream)
@@ -422,6 +448,7 @@ def records_to_dataframe(records: List[Record]) -> pd.DataFrame:
                 "Employee ID": r.employee_id,
                 "Title": r.title,
                 "Revision": r.revision,
+                "Date": r.date,
             }
             for r in records
         ]
